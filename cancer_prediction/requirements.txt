@@ -1,0 +1,6 @@
+ipykernel
+notebook
+torch
+scikit-learn
+
+.\.venv\Scripts\activate
