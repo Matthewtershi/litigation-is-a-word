@@ -1,6 +1,7 @@
-.venv
 NSE-TATAGLOBAL.csv
 archive
-tempenv
 gitignore
 
+.venv
+tempenv
+myenv
