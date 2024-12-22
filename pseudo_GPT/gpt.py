@@ -4,15 +4,15 @@ from torch.nn import functional as F
 
 # hyperparameters
 batch_size = 64 # how many independent sequences will we process in parallel?
-block_size = 8 # what is the maximum context length for predictions?
+block_size = 256 # what is the maximum context length for predictions?
 max_iters = 5000
 eval_interval = 500
-learning_rate = 1e-3
+learning_rate = 3e-4
 device = 'cuda' if torch.cuda.is_available() else 'cpu'
 eval_iters = 200
 n_embd = 384
-n_head = 6 # this means every head is 64 dimensions
-n_layer = 6 
+n_head = 6
+n_layer = 6
 dropout = 0.2
 # ------------
 
@@ -47,7 +47,7 @@ def get_batch(split):
     x, y = x.to(device), y.to(device)
     return x, y
 
-@torch.no_grad() # for memory efficiency
+@torch.no_grad()
 def estimate_loss():
     out = {}
     model.eval()
@@ -60,7 +60,6 @@ def estimate_loss():
         out[split] = losses.mean()
     model.train()
     return out
-
 
 class Head(nn.Module):
     """ one head of self-attention """
@@ -103,14 +102,14 @@ class MultiHeadAttention(nn.Module):
         out = torch.cat([h(x) for h in self.heads], dim=-1)
         out = self.dropout(self.proj(out))
         return out
-    
+
 class FeedFoward(nn.Module):
     """ a simple linear layer followed by a non-linearity """
 
     def __init__(self, n_embd):
         super().__init__()
         self.net = nn.Sequential(
-            nn.Linear(n_embd, 4 * n_embd), # n_embd dimensions to 4*n_embd dimensions
+            nn.Linear(n_embd, 4 * n_embd),
             nn.ReLU(),
             nn.Linear(4 * n_embd, n_embd),
             nn.Dropout(dropout),
@@ -132,46 +131,42 @@ class Block(nn.Module):
         self.ln2 = nn.LayerNorm(n_embd)
 
     def forward(self, x):
-        x = x + self.sa(self.ln1(x)) # adding x for residual connections
+        x = x + self.sa(self.ln1(x))
         x = x + self.ffwd(self.ln2(x))
         return x
 
-# super simple bigram model
-class BigramLanguageModel(nn.Module):
-    """ 
-    Observations:
-    Addition of 1 attention block, loss goes from 2.5 to 2.33 text is illegible
-    Addition of multi-headed attention, loss goes from 2.33 to 2.28 text is still illegible
-    Addition of feed forward processing, loss goes from 2.28 to 2.24 text is still illegible
-    Addition of residual connections, loss goes from 2.24 to 2.01 first appearance of real words 
-    Addition of dropout layers and scaling up, loss goes from 2.01 to 1.94    
-    """
+class GPTLanguageModel(nn.Module):
 
-    def __init__(self, vocab_size):
+    def __init__(self):
         super().__init__()
         # each token directly reads off the logits for the next token from a lookup table
         self.token_embedding_table = nn.Embedding(vocab_size, n_embd)
         self.position_embedding_table = nn.Embedding(block_size, n_embd)
-        # self.blocks = nn.Sequential(
-        #     Block(n_embed, n_head=4),
-        #     Block(n_embed, n_head=4),
-        #     Block(n_embed, n_head=4),
-        #     nn.LayerNorm(n_embd),
-        # )
         self.blocks = nn.Sequential(*[Block(n_embd, n_head=n_head) for _ in range(n_layer)])
-        self.ln_f = nn.LayerNorm(n_embd)
+        self.ln_f = nn.LayerNorm(n_embd) # final layer norm
         self.lm_head = nn.Linear(n_embd, vocab_size)
+
+        # better init, not covered in the original GPT video, but important, will cover in followup video
+        self.apply(self._init_weights)
+
+    def _init_weights(self, module):
+        if isinstance(module, nn.Linear):
+            torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
+            if module.bias is not None:
+                torch.nn.init.zeros_(module.bias)
+        elif isinstance(module, nn.Embedding):
+            torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
 
     def forward(self, idx, targets=None):
         B, T = idx.shape
 
         # idx and targets are both (B,T) tensor of integers
-        token_embeddings = self.token_embedding_table(idx) # (B,T,C)
-        position_embeddings = self.position_embedding_table(torch.arange(T, device=device))
-        x = token_embeddings + position_embeddings # (B, T, C)
-        x = self.blocks(x)
-        """ x now holds token meaning and token position """
-        logits = self.lm_head(x) # (B, T, vocab_size)
+        tok_emb = self.token_embedding_table(idx) # (B,T,C)
+        pos_emb = self.position_embedding_table(torch.arange(T, device=device)) # (T,C)
+        x = tok_emb + pos_emb # (B,T,C)
+        x = self.blocks(x) # (B,T,C)
+        x = self.ln_f(x) # (B,T,C)
+        logits = self.lm_head(x) # (B,T,vocab_size)
 
         if targets is None:
             loss = None
@@ -187,7 +182,7 @@ class BigramLanguageModel(nn.Module):
         # idx is (B, T) array of indices in the current context
         for _ in range(max_new_tokens):
             # crop idx to the last block_size tokens
-            idx_cond = idx[:, block_size:] # for the single attention block
+            idx_cond = idx[:, -block_size:]
             # get the predictions
             logits, loss = self(idx_cond)
             # focus only on the last time step
@@ -200,9 +195,9 @@ class BigramLanguageModel(nn.Module):
             idx = torch.cat((idx, idx_next), dim=1) # (B, T+1)
         return idx
 
-model = BigramLanguageModel(vocab_size)
-print(device)
+model = GPTLanguageModel()
 m = model.to(device)
+# print the number of parameters in the model
 print(sum(p.numel() for p in m.parameters())/1e6, 'M parameters')
 
 # create a PyTorch optimizer
@@ -211,7 +206,7 @@ optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate)
 for iter in range(max_iters):
 
     # every once in a while evaluate the loss on train and val sets
-    if iter % eval_interval == 0:
+    if iter % eval_interval == 0 or iter == max_iters - 1:
         losses = estimate_loss()
         print(f"step {iter}: train loss {losses['train']:.4f}, val loss {losses['val']:.4f}")
 
@@ -227,13 +222,4 @@ for iter in range(max_iters):
 # generate from the model
 context = torch.zeros((1, 1), dtype=torch.long, device=device)
 print(decode(m.generate(context, max_new_tokens=500)[0].tolist()))
-
-""" 
-This is only a decoder with no cross attention to an encoder 
-encoders for example: would read something in another language WITHOUT the bottom triangular mask
-decoders would then: make an additional connection to the encoder with cross attention
-    the queries are still generated by x but
-    the keys and values are now pulled from the encoder
-
-Our encoder only imitates a given text set and is therefore only a decoder
-"""
+#open('more.txt', 'w').write(decode(m.generate(context, max_new_tokens=10000)[0].tolist()))
